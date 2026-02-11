@@ -1,0 +1,11 @@
+incase you forget typescript you dingus.
+
+cd coding\2048\src
+
+npm run dev
+
+and then ctrl left click on the VITE website host url that pops up
+
+Thats it, enjoy dum dum.
+
+PS. The profiles will reset after you end the webhost in the terminal with q and enter. (Or just exit vscode)
