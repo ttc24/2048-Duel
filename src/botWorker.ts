@@ -89,15 +89,86 @@ function cornerLock(b: Board) {
   if (!atCorner) return -Math.log2(mx || 2) * 8;
   return (b[0][0] === mx ? 6 : 2) * Math.log2(mx || 2);
 }
-const evalBoard = (b: Board, score: number, noise = 0) =>
-  countEmpty(b) * 280 +
-  monotonicity(b) +
-  smoothness(b) +
-  positional(b) +
-  cornerLock(b) +
-  maxTile(b) +
-  score * 0.1 +
-  (noise ? (Math.random() - 0.5) * noise : 0);
+
+type EvalWeights = {
+  empty: number;
+  mono: number;
+  smooth: number;
+  pos: number;
+  corner: number;
+  maxTile: number;
+  score: number;
+};
+
+function getWeights(b: Board, score: number): EvalWeights {
+  const empties = countEmpty(b);
+  const mx = maxTile(b);
+  const roughness = Math.max(0, -smoothness(b));
+
+  // Defaults stay close to the previous fixed multipliers.
+  const w: EvalWeights = {
+    empty: 280,
+    mono: 1,
+    smooth: 1,
+    pos: 1,
+    corner: 1,
+    maxTile: 1,
+    score: 0.1,
+  };
+
+  // Early phase: value breathing room + move options.
+  if (empties >= 8 || mx <= 64) {
+    w.empty = 330;
+    w.smooth = 0.85;
+    w.mono = 0.9;
+    w.pos = 0.9;
+    w.corner = 0.9;
+    return w;
+  }
+
+  // Mid phase: lean into shape control and lane structure.
+  if (empties >= 4 || mx <= 512) {
+    w.empty = 285;
+    w.mono = 1.18;
+    w.pos = 1.16;
+    w.corner = 1.1;
+    w.maxTile = 1.05;
+    return w;
+  }
+
+  // Late phase: punish rough boards and corner breaks heavily.
+  w.empty = 210;
+  w.mono = 1.28;
+  w.pos = 1.22;
+  w.corner = 1.65;
+  w.maxTile = 1.12;
+  w.score = score > 12000 ? 0.08 : 0.1;
+
+  // Smoothness returns negative values, so increasing this multiplier raises roughness penalty.
+  w.smooth = roughness > 13 ? 2.1 : roughness > 8 ? 1.65 : 1.35;
+  return w;
+}
+
+const evalBoard = (b: Board, score: number, noise = 0) => {
+  const empties = countEmpty(b);
+  const mono = monotonicity(b);
+  const smooth = smoothness(b);
+  const pos = positional(b);
+  const corner = cornerLock(b);
+  const mx = maxTile(b);
+  const w = getWeights(b, score);
+
+  return (
+    empties * w.empty +
+    mono * w.mono +
+    smooth * w.smooth +
+    pos * w.pos +
+    corner * w.corner +
+    mx * w.maxTile +
+    score * w.score +
+    (noise ? (Math.random() - 0.5) * noise : 0)
+  );
+};
 
 const rot90 = (b: Board) => {
   const n = [
