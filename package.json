@@ -7,7 +7,7 @@
     "dev": "vite",
     "build": "tsc && vite build",
     "preview": "vite preview",
-    "test": "tsc -p tsconfig.test.json && node tests/patch-test-imports.mjs && node --test .tmp-tests/tests/**/*.test.js"
+    "test": "tsc -p tsconfig.test.json && node tests/patch-test-imports.mjs && node --test .tmp-tests/tests/*.test.js"
   },
   "devDependencies": {
     "@tailwindcss/postcss": "^4.1.12",
