@@ -11,7 +11,6 @@ type Dir = "left" | "right" | "up" | "down";
 const DIRS: Dir[] = ["left", "up", "right", "down"]; // tie-break favors corner play
 const MOVE_PRIO: Record<Dir, number> = { left: 0, up: 1, right: 2, down: 3 };
 
-const SIZE = 4;
 const SPAWN_4 = 0.1; // 10% 4-tile spawns
 
 type Board = number[][];
