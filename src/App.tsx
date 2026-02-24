@@ -1,177 +1,33 @@
 // App.tsx — 2048 Duel v3.4 (worker bots + race-proof step + refined UI)
 // Requires: src/botWorker.ts (v3.4) in the same folder.
 
-import React, {
-  useCallback,
-  useEffect,
-  useMemo,
-  useRef,
-  useState,
-} from "react";
+import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { motion, AnimatePresence } from "framer-motion";
+import {
+  addRandomTile,
+  anyMoves,
+  countEmpty,
+  createEmptyBoard,
+  initialBoard,
+  maxTile,
+  move,
+  validMoves,
+} from "./game-logic";
+import { useIntervalSeq } from "./hooks";
+import {
+  cryptoRandomId,
+  DEFAULT_SETTINGS,
+  loadActiveId,
+  loadProfiles,
+  saveActiveId,
+  saveProfiles,
+  SETTINGS_KEY,
+  shouldSaveDuelRun,
+  upsertRun,
+} from "./persistence";
+import { BoardView, StatBadge, Tips } from "./screens";
+import type { Board, DifficultyMeta, Dir, Profile, RunRecord, Screen, Settings } from "./types";
 
-/* =========================
-   Core game constants/types
-   ========================= */
-const SIZE = 4;
-const START_TILES = 2;
-const SPAWN_4_PROB = 0.1;
-
-const DIRS = ["left", "right", "up", "down"] as const;
-type Dir = (typeof DIRS)[number];
-type Board = number[][];
-
-type RunRecord = {
-  date: number;
-  mode: "Solo" | "Duel";
-  score: number;
-  moves: number;
-  merges: number;
-  maxTile: number;
-  durationMs: number;
-  difficultyLevel?: number; // duel only
-  outcome: "win" | "loss" | "solo";
-  bot?: { score: number; moves: number; merges: number; maxTile: number };
-};
-
-type Profile = {
-  id: string;
-  name: string;
-  createdAt: number;
-  lastPlayedAt: number;
-  runs: RunRecord[];
-  bestScore: number;
-  bestMaxTile: number;
-  bestBotBeaten: number; // highest bot level beaten
-};
-
-type Settings = {
-  showMoves: boolean;
-  showMerges: boolean;
-  showTime: boolean;
-  showEmptyCells: boolean; // for bot panel
-};
-
-/* =========================
-   Helpers (board + game ops)
-   ========================= */
-const deepCopy = (b: Board) => b.map((r) => r.slice());
-const createEmptyBoard = (): Board =>
-  Array.from({ length: SIZE }, () => Array(SIZE).fill(0));
-
-const getEmptyCells = (b: Board): [number, number][] => {
-  const out: [number, number][] = [];
-  for (let r = 0; r < SIZE; r++)
-    for (let c = 0; c < SIZE; c++) if (b[r][c] === 0) out.push([r, c]);
-  return out;
-};
-const addRandomTile = (b: Board) => {
-  const e = getEmptyCells(b);
-  if (!e.length) return { board: b, spawned: null as [number, number] | null };
-  const [r, c] = e[Math.floor(Math.random() * e.length)];
-  const v = Math.random() < SPAWN_4_PROB ? 4 : 2;
-  const nb = deepCopy(b);
-  nb[r][c] = v;
-  return { board: nb, spawned: [r, c] as [number, number] | null };
-};
-const countEmpty = (b: Board) => getEmptyCells(b).length;
-const maxTile = (b: Board) => Math.max(...b.flat());
-
-function anyMoves(b: Board) {
-  if (countEmpty(b) > 0) return true;
-  for (let r = 0; r < SIZE; r++)
-    for (let c = 0; c < SIZE; c++) {
-      const v = b[r][c];
-      if (!v) continue;
-      if (r + 1 < SIZE && b[r + 1][c] === v) return true;
-      if (c + 1 < SIZE && b[r][c + 1] === v) return true;
-    }
-  return false;
-}
-
-function compact(vs: number[]) {
-  const a = vs.filter((x) => x !== 0);
-  const out: number[] = [];
-  const merges: number[] = [];
-  let gained = 0;
-  for (let i = 0; i < a.length; i++) {
-    if (i + 1 < a.length && a[i] === a[i + 1]) {
-      const v = a[i] * 2;
-      out.push(v);
-      gained += v;
-      merges.push(out.length - 1);
-      i++;
-    } else out.push(a[i]);
-  }
-  while (out.length < SIZE) out.push(0);
-  return { out, gained, merges };
-}
-
-function move(b: Board, dir: Dir) {
-  let nb = deepCopy(b),
-    total = 0,
-    merged: [number, number][] = [];
-  if (dir === "left" || dir === "right") {
-    for (let r = 0; r < SIZE; r++) {
-      const line = nb[r].slice();
-      const raw = dir === "left" ? line : line.slice().reverse();
-      const { out, gained, merges } = compact(raw);
-      const fin = dir === "left" ? out : out.slice().reverse();
-      nb[r] = fin;
-      total += gained;
-      merges.forEach((i) =>
-        merged.push([r, dir === "left" ? i : SIZE - 1 - i])
-      );
-    }
-  } else {
-    for (let c = 0; c < SIZE; c++) {
-      const col = nb.map((row) => row[c]);
-      const raw = dir === "up" ? col : col.slice().reverse();
-      const { out, gained, merges } = compact(raw);
-      const fin = dir === "up" ? out : out.slice().reverse();
-      for (let r = 0; r < SIZE; r++) nb[r][c] = fin[r];
-      total += gained;
-      merges.forEach((i) => merged.push([dir === "up" ? i : SIZE - 1 - i, c]));
-    }
-  }
-  const moved = JSON.stringify(nb) !== JSON.stringify(b);
-  return { board: nb, moved, scoreDelta: total, mergedPositions: merged };
-}
-
-const validMoves = (b: Board) => {
-  const res: Dir[] = [];
-  for (const d of DIRS) if (move(b, d).moved) res.push(d);
-  return res;
-};
-
-/* =========================
-   UI utilities
-   ========================= */
-function useIntervalSeq(
-  callback: () => Promise<void> | void,
-  delayMs: number | null
-) {
-  const saved = useRef(callback);
-  useEffect(() => {
-    saved.current = callback;
-  }, [callback]);
-  useEffect(() => {
-    let cancelled = false;
-    async function loop() {
-      if (delayMs === null) return;
-      while (!cancelled) {
-        const t0 = performance.now();
-        await saved.current();
-        const rest = Math.max(0, delayMs - (performance.now() - t0));
-        await new Promise((r) => setTimeout(r, rest));
-      }
-    }
-    if (delayMs !== null) loop();
-    return () => {
-      cancelled = true;
-    };
-  }, [delayMs]);
-}
 const formatTime = (ms: number) => {
   const s = Math.floor(ms / 1000),
     m = Math.floor(s / 60),
@@ -181,139 +37,9 @@ const formatTime = (ms: number) => {
 const speedToDelay = (n: number) =>
   Math.round(460 - Math.max(1, Math.min(10, n)) * 40);
 
-const TILE_CLASSES: Record<number, string> = {
-  0: "bg-stone-200",
-  2: "bg-amber-100 text-stone-800",
-  4: "bg-amber-200 text-stone-800",
-  8: "bg-orange-300 text-white",
-  16: "bg-orange-400 text-white",
-  32: "bg-orange-500 text-white",
-  64: "bg-orange-600 text-white",
-  128: "bg-yellow-400 text-white",
-  256: "bg-yellow-500 text-white",
-  512: "bg-yellow-600 text-white",
-  1024: "bg-lime-500 text-white",
-  2048: "bg-emerald-500 text-white",
-};
-
-function StatBadge({
-  label,
-  value,
-}: {
-  label: string;
-  value: React.ReactNode;
-}) {
-  return (
-    <div className="rounded-xl bg-stone-200 px-3 py-2 text-sm font-medium shadow">
-      <span className="text-stone-500 mr-2">{label}</span>
-      <span className="text-stone-900">{value}</span>
-    </div>
-  );
-}
-
-function BoardView({
-  board,
-  mergedCells,
-}: {
-  board: Board;
-  mergedCells: Set<string>;
-}) {
-  return (
-    <div className="w-full max-w-[540px] mx-auto">
-      <div className="grid grid-cols-4 gap-2 p-3 rounded-3xl bg-stone-300 shadow-inner">
-        {board.map((row, r) =>
-          row.map((v, c) => {
-            const key = `${r}-${c}`;
-            const active = mergedCells.has(key);
-            const cls = TILE_CLASSES[v] || "bg-emerald-600 text-white";
-            return (
-              <motion.div
-                key={key}
-                animate={{ scale: active ? 1.06 : 1 }}
-                transition={{ type: "spring", stiffness: 420, damping: 24 }}
-                className={`aspect-square w-full rounded-2xl font-extrabold flex items-center justify-center shadow ${cls}`}
-              >
-                {v !== 0 ? (
-                  <span className="text-xl md:text-2xl lg:text-3xl select-none">
-                    {v}
-                  </span>
-                ) : (
-                  <span className="opacity-0">0</span>
-                )}
-              </motion.div>
-            );
-          })
-        )}
-      </div>
-    </div>
-  );
-}
-
-/* =========================
-   Persistence
-   ========================= */
-const LS_KEY = "duel2048_profiles_v30";
-const LS_ACTIVE = "duel2048_active_profile";
-const SETTINGS_KEY = "duel2048_settings_v30";
-
-const loadProfiles = (): Profile[] => {
-  try {
-    const s = localStorage.getItem(LS_KEY);
-    return s ? (JSON.parse(s) as Profile[]) : [];
-  } catch {
-    return [];
-  }
-};
-const saveProfiles = (p: Profile[]) =>
-  localStorage.setItem(LS_KEY, JSON.stringify(p));
-const loadActiveId = () => localStorage.getItem(LS_ACTIVE);
-const saveActiveId = (id: string) => localStorage.setItem(LS_ACTIVE, id);
-
-function upsertRun(profile: Profile, run: RunRecord): Profile {
-  const runs = [...profile.runs, run];
-  const bestScore = Math.max(profile.bestScore, run.score);
-  const bestMaxTile = Math.max(profile.bestMaxTile, run.maxTile);
-  const bestBotBeaten =
-    run.outcome === "win" && (run.difficultyLevel ?? 0) > profile.bestBotBeaten
-      ? run.difficultyLevel || 0
-      : profile.bestBotBeaten;
-  return {
-    ...profile,
-    runs,
-    bestScore,
-    bestMaxTile,
-    bestBotBeaten,
-    lastPlayedAt: Date.now(),
-  };
-}
-const cryptoRandomId = () => {
-  try {
-    return Array.from(crypto.getRandomValues(new Uint32Array(3)))
-      .map((n) => n.toString(36))
-      .join("");
-  } catch {
-    return Math.random().toString(36).slice(2);
-  }
-};
-
-const initialBoard = () => {
-  let b = createEmptyBoard();
-  for (let i = 0; i < START_TILES; i++) b = addRandomTile(b).board;
-  return b;
-};
-
 /* =========================
    App
    ========================= */
-type Screen = "menu" | "game" | "leaderboard" | "profiles";
-const DEFAULT_SETTINGS: Settings = {
-  showMoves: true,
-  showMerges: true,
-  showTime: true,
-  showEmptyCells: false,
-};
-
-type DifficultyMeta = { level: number; name: string };
 const DIFFICULTIES: readonly DifficultyMeta[] = [
   { level: 1, name: "Goldfish" },
   { level: 2, name: "Pigeon" },
@@ -617,11 +343,13 @@ export default function Duel2048() {
 
     // DUEL: save only if bot is out AND player eventually beats bot's final score, on player's finish
     if (
-      mode === "Duel" &&
-      pOver &&
-      botFinalScore.current !== null &&
-      pScore > botFinalScore.current &&
-      !duelSavedRef.current
+      shouldSaveDuelRun({
+        mode,
+        playerOver: pOver,
+        playerScore: pScore,
+        botFinalScore: botFinalScore.current,
+        duelAlreadySaved: duelSavedRef.current,
+      })
     ) {
       const run: RunRecord = {
         date: Date.now(),
@@ -757,59 +485,6 @@ export default function Duel2048() {
             >
               Create
             </button>
-          </div>
-        </div>
-      </div>
-    );
-  }
-
-  function Tips() {
-    const general = [
-      "Anchor your highest tile in a corner; prefer two directions (e.g., Left + Up).",
-      "Create empty cells first; merge second.",
-      "Keep the corner row/column monotonic (values increase toward the corner).",
-      "Avoid pushing small tiles behind your big corner tile.",
-      "If stuck, do a quick parity swap then immediately re-anchor.",
-    ];
-    const botTips: Record<number, string[]> = {
-      1: ["Very random—hold a corner and you’ll win."],
-      2: ["Biased to corner—be patient and keep empties."],
-      3: ["Corner policy—avoid breaking your snake row."],
-      4: ["One-ply EV—starve empties to trick it."],
-      5: ["Short lookahead—don’t trade empties for tiny merges."],
-      6: ["Re-anchor quickly after parity flips."],
-      7: ["Orders moves by EV—deny empty cells."],
-      8: ["Deep lookahead—play strict two-direction style."],
-      9: ["Rare mistakes—force low-empty boards, then merge back."],
-      10: ["Brutal—only clean corner play survives."],
-    };
-    return (
-      <div className="rounded-3xl bg-white p-4 shadow border border-stone-200 space-y-4">
-        <div>
-          <h3 className="font-semibold mb-2">General Tips</h3>
-          <ul className="list-disc pl-6 text-sm text-stone-700 space-y-1">
-            {general.map((t, i) => (
-              <li key={i}>{t}</li>
-            ))}
-          </ul>
-        </div>
-        <div>
-          <h3 className="font-semibold mb-2">Beating the Bots</h3>
-          <div className="grid sm:grid-cols-2 lg:grid-cols-3 gap-3 text-sm text-stone-700">
-            {DIFFICULTIES.map((d) => (
-              <div key={d.level} className="rounded-xl border p-3">
-                <div className="font-medium mb-1">
-                  {d.level} — {d.name}
-                </div>
-                <ul className="list-disc pl-5 space-y-1">
-                  {(
-                    botTips[d.level] ?? ["Play tight and protect your corner."]
-                  ).map((t, i) => (
-                    <li key={i}>{t}</li>
-                  ))}
-                </ul>
-              </div>
-            ))}
           </div>
         </div>
       </div>
