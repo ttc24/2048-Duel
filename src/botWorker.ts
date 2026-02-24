@@ -28,6 +28,27 @@ const emptyCells = (b: Board) => {
 const countEmpty = (b: Board) => emptyCells(b).length;
 const maxTile = (b: Board) => Math.max(...flat(b));
 
+type Rng = {
+  next: () => number;
+};
+
+function createRng(seed?: number): Rng {
+  if (seed === undefined || !Number.isFinite(seed)) {
+    return { next: () => Math.random() };
+  }
+  // Mulberry32: compact deterministic PRNG for replayability/tuning.
+  let state = (seed >>> 0) || 0x6d2b79f5;
+  return {
+    next: () => {
+      state = (state + 0x6d2b79f5) >>> 0;
+      let z = state;
+      z = Math.imul(z ^ (z >>> 15), z | 1);
+      z ^= z + Math.imul(z ^ (z >>> 7), z | 61);
+      return ((z ^ (z >>> 14)) >>> 0) / 4294967296;
+    },
+  };
+}
+
 function move(b: Board, dir: Dir) {
   const { board, moved, scoreDelta } = applyMove(b, dir);
   return { board, moved, gained: scoreDelta };
@@ -149,7 +170,7 @@ function getWeights(b: Board, score: number): EvalWeights {
   return w;
 }
 
-const evalBoard = (b: Board, score: number, noise = 0) => {
+const evalBoard = (b: Board, score: number, noise = 0, rng?: Rng) => {
   const empties = countEmpty(b);
   const mono = monotonicity(b);
   const smooth = smoothness(b);
@@ -166,7 +187,7 @@ const evalBoard = (b: Board, score: number, noise = 0) => {
     corner * w.corner +
     mx * w.maxTile +
     score * w.score +
-    (noise ? (Math.random() - 0.5) * noise : 0)
+    (noise ? ((rng?.next() ?? Math.random()) - 0.5) * noise : 0)
   );
 };
 
@@ -191,25 +212,52 @@ const canonKey = (b: Board) =>
     .map((x) => flat(x).join(","))
     .sort()[0];
 
-function qAfter(b: Board, d: Dir, score: number, noise: number) {
+function qAfter(b: Board, d: Dir, score: number, noise: number, rng?: Rng) {
   const { board: nb, moved, gained } = move(b, d);
-  return moved ? evalBoard(nb, score + gained, noise) : -Infinity;
+  return moved ? evalBoard(nb, score + gained, noise, rng) : -Infinity;
 }
-const orderMoves = (b: Board, score: number, noise: number) =>
+const orderMoves = (b: Board, score: number, noise: number, rng?: Rng) =>
   legal(b).sort(
     (a, b2) =>
-      qAfter(b, b2, score, noise) - qAfter(b, a, score, noise) ||
+      qAfter(b, b2, score, noise, rng) - qAfter(b, a, score, noise, rng) ||
       MOVE_PRIO[a] - MOVE_PRIO[b2]
   );
 
-function sample<T>(a: T[], k: number) {
-  if (a.length <= k) return a;
-  const x = a.slice();
-  for (let i = x.length - 1; i > 0; i--) {
-    const j = (Math.random() * (i + 1)) | 0;
-    [x[i], x[j]] = [x[j], x[i]];
+function chanceRiskScore(b: Board, [r, c]: [number, number]) {
+  let score = 0;
+  const neigh: [number, number][] = [
+    [r - 1, c],
+    [r + 1, c],
+    [r, c - 1],
+    [r, c + 1],
+  ];
+  for (const [nr, nc] of neigh) {
+    if (nr < 0 || nr > 3 || nc < 0 || nc > 3) continue;
+    const v = b[nr][nc];
+    if (!v) continue;
+    score += Math.log2(v);
   }
-  return x.slice(0, k);
+  const edgeBonus = r === 0 || r === 3 || c === 0 || c === 3 ? 0.8 : 0;
+  const cornerBonus =
+    (r === 0 || r === 3) && (c === 0 || c === 3) ? 0.7 : 0;
+  return score + edgeBonus + cornerBonus;
+}
+
+function topKChanceCells(
+  b: Board,
+  empties: [number, number][],
+  k: number
+): [number, number][] {
+  if (empties.length <= k) return empties;
+  return empties
+    .slice()
+    .sort(
+      (a, b2) =>
+        chanceRiskScore(b, b2) - chanceRiskScore(b, a) ||
+        a[0] - b2[0] ||
+        a[1] - b2[1]
+    )
+    .slice(0, k);
 }
 
 /* ---------- Difficulty plan ---------- */
@@ -408,7 +456,7 @@ function applyCeiling(cfg: Cfg, score: number) {
 }
 
 /* ---------- Expectimax ---------- */
-function expectimaxMove(b: Board, score: number, cfg: Cfg): Dir {
+function expectimaxMove(b: Board, score: number, cfg: Cfg, rng: Rng): Dir {
   const deadline = performance.now() + cfg.timeMs;
   const TT = cfg.cache
     ? new Map<string, { depth: number; val: number }>()
@@ -421,11 +469,11 @@ function expectimaxMove(b: Board, score: number, cfg: Cfg): Dir {
   ): { val: number; dir: Dir } => {
     const L = legal(B);
     if (depth === 0 || L.length === 0 || performance.now() > deadline)
-      return { val: evalBoard(B, sc, cfg.evalNoise), dir: "left" };
+      return { val: evalBoard(B, sc, cfg.evalNoise, rng), dir: "left" };
 
     let best = -Infinity,
       bd: Dir = "left";
-    for (const d of orderMoves(B, sc, cfg.evalNoise)) {
+    for (const d of orderMoves(B, sc, cfg.evalNoise, rng)) {
       const { board: nb, moved, gained } = move(B, d);
       if (!moved) continue;
       const { val } = chanceNode(nb, sc + gained, depth - 1);
@@ -446,11 +494,15 @@ function expectimaxMove(b: Board, score: number, cfg: Cfg): Dir {
     }
     const empties = emptyCells(B);
     if (depth === 0 || empties.length === 0 || performance.now() > deadline)
-      return { val: evalBoard(B, sc, cfg.evalNoise) };
+      return { val: evalBoard(B, sc, cfg.evalNoise, rng) };
 
     const cells = cfg.fullChance
       ? empties
-      : sample(empties, Math.max(1, Math.min(cfg.sample, empties.length)));
+      : topKChanceCells(
+          B,
+          empties,
+          Math.max(1, Math.min(cfg.sample, empties.length))
+        );
 
     let acc = 0;
     for (const [r, c] of cells) {
@@ -471,7 +523,7 @@ function expectimaxMove(b: Board, score: number, cfg: Cfg): Dir {
   if (!L.length) return "left";
 
   // quick ordered guess
-  let bestDir = orderMoves(b, score, cfg.evalNoise)[0] ?? L[0];
+  let bestDir = orderMoves(b, score, cfg.evalNoise, rng)[0] ?? L[0];
   for (let d = cfg.baseDepth; d <= cfg.baseDepth + cfg.boost; d++) {
     const { dir } = maxNode(b, score, d);
     bestDir = dir;
@@ -481,13 +533,13 @@ function expectimaxMove(b: Board, score: number, cfg: Cfg): Dir {
 }
 
 /* ---------- Difficulty wrapper (softmax + epsilon + doom) ---------- */
-function softmaxPick(b: Board, score: number, cfg: Cfg): Dir {
+function softmaxPick(b: Board, score: number, cfg: Cfg, rng: Rng): Dir {
   const L = legal(b);
   if (!L.length) return "left";
 
-  const best = expectimaxMove(b, score, cfg);
+  const best = expectimaxMove(b, score, cfg, rng);
   const noise = cfg.evalNoise;
-  const evs = L.map((d) => qAfter(b, d, score, noise));
+  const evs = L.map((d) => qAfter(b, d, score, noise, rng));
   const maxEv = Math.max(...evs);
   const probs = evs.map((e) =>
     Math.exp((e - maxEv) / Math.max(1e-6, cfg.temp))
@@ -496,7 +548,7 @@ function softmaxPick(b: Board, score: number, cfg: Cfg): Dir {
 
   let soft = L[0];
   if (sum > 0) {
-    let r = Math.random() * sum;
+    let r = rng.next() * sum;
     for (let i = 0; i < L.length; i++) {
       r -= probs[i];
       if (r <= 0) {
@@ -509,7 +561,7 @@ function softmaxPick(b: Board, score: number, cfg: Cfg): Dir {
   // Doom after ceiling: occasionally take the worst EV move (ramps to doomMax)
   // @ts-ignore
   const doomProb: number = (cfg as any).doomProb ?? 0;
-  if (doomProb && Math.random() < doomProb) {
+  if (doomProb && rng.next() < doomProb) {
     let worst = L[0],
       worstEv = Infinity;
     for (let i = 0; i < L.length; i++)
@@ -522,18 +574,24 @@ function softmaxPick(b: Board, score: number, cfg: Cfg): Dir {
 
   // ε-greedy around soft choice; high levels prefer best
   const mixed =
-    Math.random() < cfg.epsilon ? L[(Math.random() * L.length) | 0] : soft;
-  return cfg.level >= 8 ? (Math.random() < 0.88 ? best : mixed) : mixed;
+    rng.next() < cfg.epsilon ? L[(rng.next() * L.length) | 0] : soft;
+  return cfg.level >= 8 ? (rng.next() < 0.88 ? best : mixed) : mixed;
 }
 
-function chooseMove(board: number[], score: number, level: number): Dir {
+function chooseMove(
+  board: number[],
+  score: number,
+  level: number,
+  rngSeed?: number
+): Dir {
   const base = PLAN[Math.max(1, Math.min(10, level)) - 1];
   const cfg = applyCeiling(base, score);
   const b = mkBoard(board);
+  const rng = createRng(rngSeed);
   const L = legal(b);
   if (!L.length) return "left";
 
-  const dir = softmaxPick(b, score, cfg);
+  const dir = softmaxPick(b, score, cfg, rng);
 
   // Safety: ensure we return a direction that actually moves
   if (move(b, dir).moved) return dir;
@@ -543,8 +601,13 @@ function chooseMove(board: number[], score: number, level: number): Dir {
 
 /* ---------- Worker protocol ---------- */
 self.onmessage = (e: MessageEvent) => {
-  const { id, type, board, score, level } = e.data || {};
+  const { id, type, board, score, level, rngSeed } = e.data || {};
   if (type !== "move") return;
-  const dir = chooseMove(board as number[], score as number, level as number);
+  const dir = chooseMove(
+    board as number[],
+    score as number,
+    level as number,
+    rngSeed as number | undefined
+  );
   (postMessage as any)({ id, dir });
 };
