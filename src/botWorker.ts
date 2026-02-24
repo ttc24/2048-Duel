@@ -1,4 +1,7 @@
 /// <reference lib="webworker" />
+import { applyMove, boardFromFlat, copyBoard, flattenBoard } from "./engine/sim";
+import type { Board, Dir } from "./types";
+
 export {};
 
 /* 2048 botWorker v3.6
@@ -7,17 +10,14 @@ export {};
    - Ceiling ramp (ceilSpan + doomMax) to force natural loss on low levels
 */
 
-type Dir = "left" | "right" | "up" | "down";
 const DIRS: Dir[] = ["left", "up", "right", "down"]; // tie-break favors corner play
 const MOVE_PRIO: Record<Dir, number> = { left: 0, up: 1, right: 2, down: 3 };
 
 const SPAWN_4 = 0.1; // 10% 4-tile spawns
 
-type Board = number[][];
-const mkBoard = (flat: number[]): Board =>
-  [0, 1, 2, 3].map((r) => flat.slice(r * 4, r * 4 + 4));
-const flat = (b: Board) => b[0].concat(b[1], b[2], b[3]);
-const copy = (b: Board) => b.map((r) => r.slice());
+const mkBoard = (flat: number[]): Board => boardFromFlat(flat);
+const flat = (b: Board) => flattenBoard(b);
+const copy = (b: Board) => copyBoard(b);
 
 const emptyCells = (b: Board) => {
   const out: [number, number][] = [];
@@ -28,49 +28,11 @@ const emptyCells = (b: Board) => {
 const countEmpty = (b: Board) => emptyCells(b).length;
 const maxTile = (b: Board) => Math.max(...flat(b));
 
-function compact(v: number[]) {
-  const a = v.filter(Boolean),
-    out: number[] = [];
-  let gained = 0;
-  for (let i = 0; i < a.length; i++) {
-    if (i + 1 < a.length && a[i] === a[i + 1]) {
-      const x = a[i] * 2;
-      out.push(x);
-      gained += x;
-      i++;
-    } else out.push(a[i]);
-  }
-  while (out.length < 4) out.push(0);
-  return { out, gained };
-}
 function move(b: Board, dir: Dir) {
-  const nb = copy(b);
-  let gained = 0;
-  let moved = false;
-  if (dir === "left" || dir === "right") {
-    for (let r = 0; r < 4; r++) {
-      const row = nb[r].slice();
-      const raw = dir === "left" ? row : row.slice().reverse();
-      const { out, gained: g } = compact(raw);
-      const fin = dir === "left" ? out : out.slice().reverse();
-      if (!moved) moved = fin.some((v, i) => v !== nb[r][i]);
-      nb[r] = fin;
-      gained += g;
-    }
-  } else {
-    for (let c = 0; c < 4; c++) {
-      const col = [nb[0][c], nb[1][c], nb[2][c], nb[3][c]];
-      const raw = dir === "up" ? col : col.slice().reverse();
-      const { out, gained: g } = compact(raw);
-      const fin = dir === "up" ? out : out.slice().reverse();
-      for (let r = 0; r < 4; r++) if (nb[r][c] !== fin[r]) moved = true;
-      for (let r = 0; r < 4; r++) nb[r][c] = fin[r];
-      gained += g;
-    }
-  }
-  return { board: nb, moved, gained };
+  const { board, moved, scoreDelta } = applyMove(b, dir);
+  return { board, moved, gained: scoreDelta };
 }
-const legal = (b: Board) => DIRS.filter((d) => move(b, d).moved);
+const legal = (b: Board) => DIRS.filter((d) => applyMove(b, d).moved);
 
 /* ---------- Heuristic ---------- */
 const POS = [
