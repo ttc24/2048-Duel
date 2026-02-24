@@ -73,6 +73,7 @@ export default function Duel2048() {
 
   const workerRef = useRef<Worker | null>(null);
   const reqSeq = useRef(0);
+  const pendingBotRequests = useRef(new Map<string, () => void>());
 
   useEffect(() => {
     let cancelled = false;
@@ -86,6 +87,8 @@ export default function Duel2048() {
     })();
     return () => {
       cancelled = true;
+      pendingBotRequests.current.forEach((resolveFallback) => resolveFallback());
+      pendingBotRequests.current.clear();
       workerRef.current?.terminate();
     };
   }, []);
@@ -95,14 +98,45 @@ export default function Duel2048() {
     if (!w) return Promise.resolve(fallbackBotMove(board));
     return new Promise((resolve) => {
       const id = (++reqSeq.current).toString(36);
+      let settled = false;
+      const timeoutId = window.setTimeout(() => {
+        if (!settled) {
+          cleanup();
+          resolve(fallbackBotMove(board));
+        }
+      }, 300);
+
+      const cleanup = () => {
+        if (settled) return;
+        settled = true;
+        window.clearTimeout(timeoutId);
+        pendingBotRequests.current.delete(id);
+        w.removeEventListener("message", onMsg as EventListener);
+        w.removeEventListener("error", onErr as EventListener);
+        w.removeEventListener("messageerror", onErr as EventListener);
+      };
+
       const onMsg = (e: MessageEvent) => {
         if (e.data?.id === id) {
-          w.removeEventListener("message", onMsg as EventListener);
+          cleanup();
           resolve(e.data.dir as Dir);
         }
       };
+
+      const onErr = () => {
+        cleanup();
+        resolve(fallbackBotMove(board));
+      };
+
+      pendingBotRequests.current.set(id, onErr);
       w.addEventListener("message", onMsg as EventListener);
-      w.postMessage({ id, type: "move", board: board.flat(), score, level });
+      w.addEventListener("error", onErr as EventListener);
+      w.addEventListener("messageerror", onErr as EventListener);
+      try {
+        w.postMessage({ id, type: "move", board: board.flat(), score, level });
+      } catch {
+        onErr();
+      }
     });
   }
 
@@ -154,22 +188,24 @@ export default function Duel2048() {
     if (screen !== "game" || !botRunning || bOver || mode !== "Duel" || showSettings) return;
     if (botBusy.current) return;
     botBusy.current = true;
-    const dir = await askBotMove(bBoard, bScore, difficulty.level);
-    setBBoard((prev) => {
-      const { board: nb, moved, scoreDelta, mergedPositions } = move(prev, dir);
-      if (!moved) {
-        if (!validMoves(prev).length) setBOver(true);
-        botBusy.current = false;
-        return prev;
-      }
-      const { board: withSpawn } = addRandomTile(nb);
-      setBScore((s) => s + scoreDelta);
-      setBMoves((m) => m + 1);
-      setBMerges((m) => m + mergedPositions.length);
-      if (!anyMoves(withSpawn)) setBOver(true);
+    try {
+      const dir = await askBotMove(bBoard, bScore, difficulty.level);
+      setBBoard((prev) => {
+        const { board: nb, moved, scoreDelta, mergedPositions } = move(prev, dir);
+        if (!moved) {
+          if (!validMoves(prev).length) setBOver(true);
+          return prev;
+        }
+        const { board: withSpawn } = addRandomTile(nb);
+        setBScore((s) => s + scoreDelta);
+        setBMoves((m) => m + 1);
+        setBMerges((m) => m + mergedPositions.length);
+        if (!anyMoves(withSpawn)) setBOver(true);
+        return withSpawn;
+      });
+    } finally {
       botBusy.current = false;
-      return withSpawn;
-    });
+    }
   }, screen === "game" && botRunning && !bOver && mode === "Duel" && !showSettings ? speedToDelay(botSpeed) : null);
 
   useEffect(() => {
