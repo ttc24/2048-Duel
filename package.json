@@ -7,7 +7,8 @@
     "dev": "vite",
     "build": "tsc && vite build",
     "preview": "vite preview",
-    "test": "tsc -p tsconfig.test.json && node tests/patch-test-imports.mjs && node --test .tmp-tests/tests/*.test.js"
+    "test": "tsc -p tsconfig.test.json && node tests/patch-test-imports.mjs && node --test .tmp-tests/tests/*.test.js",
+    "calibrate:bot": "tsc -p tsconfig.calibrate.json && node scripts/patch-imports.mjs .tmp-calibrate && node .tmp-calibrate/scripts/calibrate-bot.js"
   },
   "devDependencies": {
     "@tailwindcss/postcss": "^4.1.12",
