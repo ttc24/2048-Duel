@@ -1,0 +1,20 @@
+{
+  "extends": "./tsconfig.json",
+  "compilerOptions": {
+    "noEmit": false,
+    "outDir": ".tmp-calibrate",
+    "rootDir": ".",
+    "module": "ESNext",
+    "moduleResolution": "Bundler",
+    "allowImportingTsExtensions": false,
+    "verbatimModuleSyntax": true
+  },
+  "include": [
+    "scripts/calibrate-bot.ts",
+    "src/**/*.ts"
+  ],
+  "exclude": [
+    "src/**/*.tsx",
+    "tests/**"
+  ]
+}
